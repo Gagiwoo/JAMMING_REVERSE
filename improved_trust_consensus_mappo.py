@@ -886,7 +886,7 @@ class MAPPOAgentWithTrust:
             self.det_buf = {"in": [], "tgt": []}
         
         self.buffer = RolloutBuffer()
-        self.trust_buf = {"feat": [], "real": [], "fused": [], "curr": [], "prev": []}
+        self.trust_buf = {"feat": [], "gps": [], "real": [], "prev": []}  # ✅ 수정: gps 추가, fused/curr 제거
     
     def reset_episode(self, agents):
         """에피소드 시작 시 초기화"""
@@ -956,18 +956,21 @@ class MAPPOAgentWithTrust:
                     
                     # ✅ 개선: 융합된 위치 계산
                     if real_pos is not None:
-                        gp = torch.tensor(gps_pos[idx], device=DEVICE)
-                        rp = torch.tensor(real_pos[idx], device=DEVICE)
-                        fused = t_gps * gp + t_vis * rp
+                        gp = torch.tensor(gps_pos[idx], device=DEVICE, dtype=torch.float32)
+                        rp = torch.tensor(real_pos[idx], device=DEVICE, dtype=torch.float32)
+                        
+                        # ✅ 수정: gradient를 유지하기 위해 t_out 텐서 직접 사용
+                        fused = t_out[0] * gp + t_out[1] * rp
                         prev = self.last_trust_scores.get(aid, torch.tensor([0.5, 0.5], device=DEVICE))
                         
                         # Trust Loss 계산용 버퍼에 저장
-                        self.trust_buf['feat'].append(t_feat)
+                        self.trust_buf['feat'].append(t_feat.squeeze(0))  # (4,)
+                        self.trust_buf['gps'].append(gp)  # ✅ 추가: GPS 위치 저장
                         self.trust_buf['real'].append(rp)
-                        self.trust_buf['fused'].append(fused)
-                        self.trust_buf['curr'].append(t_out)
                         self.trust_buf['prev'].append(prev)
                         self.last_trust_scores[aid] = t_out.detach()
+                        
+                        fused_pos_np = fused.detach().cpu().numpy()
                         
                         fused_pos_np = fused.cpu().numpy()
                     else:
@@ -1058,12 +1061,23 @@ class MAPPOAgentWithTrust:
         
         # Trust Network Update
         if self.use_trust and self.trust_buf['feat']:
-            fused = torch.stack(self.trust_buf['fused'])
-            real = torch.stack(self.trust_buf['real'])
-            curr = torch.stack(self.trust_buf['curr'])
-            prev = torch.stack(self.trust_buf['prev'])
+            # ✅ 수정: Trust Network를 다시 forward pass 하여 gradient 연결
+            feat_tensor = torch.stack(self.trust_buf['feat'])  # (N, 4)
+            gps_tensor = torch.stack(self.trust_buf['gps'])    # (N, 2)
+            real_tensor = torch.stack(self.trust_buf['real'])  # (N, 2)
+            prev_tensor = torch.stack(self.trust_buf['prev'])  # (N, 2)
             
-            loss = self.trust_loss.compute(fused, real, curr, prev)
+            # Trust Network forward (gradient 활성화)
+            trust_out = self.trust_net(feat_tensor)  # (N, 2) [GPS_trust, Vision_trust]
+            
+            # 융합된 위치 계산
+            fused_pos = trust_out[:, 0:1] * gps_tensor + trust_out[:, 1:2] * real_tensor
+            
+            # Loss 계산: Fusion Loss + Smoothness Loss
+            fusion_loss = torch.mean((fused_pos - real_tensor) ** 2)
+            smoothness_loss = torch.mean((trust_out - prev_tensor) ** 2)
+            loss = fusion_loss + self.trust_loss.lambda_reg * smoothness_loss
+            
             self.trust_opt.zero_grad()
             loss.backward()
             self.trust_opt.step()
