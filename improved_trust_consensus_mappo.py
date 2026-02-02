@@ -1317,18 +1317,26 @@ class MainWindow(QMainWindow):
         left_panel.addWidget(config_group)
         
         # 버튼
-        btn_layout = QHBoxLayout()
+        btn_layout1 = QHBoxLayout()
         self.start_btn = QPushButton("🚀 학습 시작")
         self.start_btn.clicked.connect(self.start_training)
         self.stop_btn = QPushButton("⏹️ 중단")
         self.stop_btn.clicked.connect(self.stop_all_training)
+        
+        btn_layout1.addWidget(self.start_btn)
+        btn_layout1.addWidget(self.stop_btn)
+        left_panel.addLayout(btn_layout1)
+        
+        # 데모 및 도구 버튼
+        btn_layout2 = QHBoxLayout()
+        self.demo_btn = QPushButton("🎮 데모 실행")
+        self.demo_btn.clicked.connect(self.run_demo)
         self.tb_btn = QPushButton("📊 TensorBoard")
         self.tb_btn.clicked.connect(self.open_tensorboard)
         
-        btn_layout.addWidget(self.start_btn)
-        btn_layout.addWidget(self.stop_btn)
-        btn_layout.addWidget(self.tb_btn)
-        left_panel.addLayout(btn_layout)
+        btn_layout2.addWidget(self.demo_btn)
+        btn_layout2.addWidget(self.tb_btn)
+        left_panel.addLayout(btn_layout2)
         
         left_panel.addStretch()
         main_layout.addLayout(left_panel, 1)
@@ -1404,6 +1412,107 @@ class MainWindow(QMainWindow):
         """모든 학습 중단"""
         self.stop_flag[0] = True
         self.append_log("⚠️ 학습 중단 요청...\n")
+    
+    def run_demo(self):
+        """학습된 모델로 데모 실행"""
+        # 알고리즘 선택 확인
+        selected_algos = [name for name, cb in self.algo_checkboxes.items() if cb.isChecked()]
+        
+        if not selected_algos:
+            self.append_log("⚠️ 데모를 실행할 알고리즘을 선택해주세요.\n")
+            return
+        
+        if len(selected_algos) > 1:
+            self.append_log("⚠️ 데모는 한 번에 하나의 알고리즘만 실행 가능합니다.\n")
+            return
+        
+        algo_name = selected_algos[0]
+        
+        # 모델 경로 선택 다이얼로그
+        from PySide6.QtWidgets import QFileDialog
+        model_dir = QFileDialog.getExistingDirectory(
+            self, 
+            "학습된 모델 폴더 선택",
+            "./models",
+            QFileDialog.Option.ShowDirsOnly
+        )
+        
+        if not model_dir:
+            self.append_log("⚠️ 모델 폴더가 선택되지 않았습니다.\n")
+            return
+        
+        # 데모 실행
+        self.append_log(f"🎮 [{algo_name}] 데모 실행 중...\n")
+        self.append_log(f"📁 모델 경로: {model_dir}\n")
+        
+        try:
+            config = BASE_CONFIG.copy()
+            config.update(ALGORITHM_CONFIGS[algo_name])
+            config["render_mode"] = "human"  # 시각화 활성화
+            
+            # 데모 스레드 시작
+            demo_thread = threading.Thread(
+                target=self.demo_worker,
+                args=(config, algo_name, model_dir),
+                daemon=True
+            )
+            demo_thread.start()
+            
+        except Exception as e:
+            self.append_log(f"❌ 데모 실행 실패: {e}\n")
+    
+    def demo_worker(self, config, algo_name, model_dir):
+        """데모 실행 워커"""
+        try:
+            # 환경 생성
+            env = CTDEMultiUAVEnv(config, render_mode="human")
+            agent = MAPPOAgentWithTrust(env.local_obs_dim, env.global_obs_dim, env.action_dim, config)
+            
+            # 모델 로드
+            try:
+                agent.load_models(model_dir)
+                self.data_queue.put(("log", f"✅ 모델 로드 완료\n"))
+            except Exception as e:
+                self.data_queue.put(("log", f"⚠️ 모델 로드 실패, 랜덤 정책 사용: {e}\n"))
+            
+            # 데모 에피소드 실행
+            for ep in range(config["demo_episodes"]):
+                scenario = EnvironmentScenario(config)
+                lo, go = env.reset_with_scenario(scenario)
+                agent.reset_episode(env.agents)
+                done = False
+                ep_r = 0
+                step = 0
+                
+                self.data_queue.put(("log", f"\n📺 에피소드 {ep+1}/{config['demo_episodes']} 시작\n"))
+                
+                while not done and step < config["max_steps"]:
+                    # 결정적 액션 선택 (탐험 없이)
+                    acts, _, _, trust_info = agent.select_action(
+                        lo, go, env.uav_positions, env.gps_positions, 
+                        env=env, deterministic=True
+                    )
+                    
+                    lo, go, rew, done, info = env.step(acts)
+                    ep_r += sum(rew.values())
+                    step += 1
+                    
+                    # 렌더링
+                    env.render()
+                    time.sleep(config["render_delay"])
+                
+                # 결과 출력
+                success_rate = info.get("success_rate", 0)
+                collision_rate = info.get("collision_rate", 0)
+                self.data_queue.put(("log", 
+                    f"  보상: {ep_r:.1f}, 성공률: {success_rate:.1%}, 충돌률: {collision_rate:.1%}\n"))
+            
+            env.close()
+            self.data_queue.put(("log", f"\n✅ 데모 완료\n"))
+            
+        except Exception as e:
+            import traceback
+            self.data_queue.put(("log", f"❌ 데모 오류: {e}\n{traceback.format_exc()}\n"))
     
     def open_tensorboard(self):
         """TensorBoard 실행"""
