@@ -1224,22 +1224,31 @@ def run_training(config, algorithm_name, data_queue, stop_flag):
             
             # 로그
             avg_r, avg_s, avg_c = np.mean(rew_list), np.mean(succ_list), np.mean(coll_list)
-            writer.add_scalar("Reward", avg_r, ep)
-            writer.add_scalar("Success", avg_s, ep)
-            writer.add_scalar("Collision", avg_c, ep)
+            writer.add_scalar(f"{algorithm_name}/Reward", avg_r, ep)
+            writer.add_scalar(f"{algorithm_name}/Success", avg_s, ep)
+            writer.add_scalar(f"{algorithm_name}/Collision", avg_c, ep)
             
-            # ✅ Trust/Consensus 통계 로깅
+            # ✅ Trust/Consensus 통계 로깅 (알고리즘 이름 포함)
+            avg_trust_gps, avg_trust_vis, avg_suspicion = 0.0, 0.0, 0.0
             if trust_gps_list:
                 avg_trust_gps = np.mean(trust_gps_list)
                 avg_trust_vis = np.mean(trust_vis_list)
-                writer.add_scalar("Trust/GPS", avg_trust_gps, ep)
-                writer.add_scalar("Trust/Vision", avg_trust_vis, ep)
+                writer.add_scalar(f"{algorithm_name}/Trust_GPS", avg_trust_gps, ep)
+                writer.add_scalar(f"{algorithm_name}/Trust_Vision", avg_trust_vis, ep)
             if suspicion_ratio_list:
                 avg_suspicion = np.mean(suspicion_ratio_list)
-                writer.add_scalar("Consensus/SuspicionRatio", avg_suspicion, ep)
+                writer.add_scalar(f"{algorithm_name}/Consensus_SuspicionRatio", avg_suspicion, ep)
             
             if ep % 100 == 0:
-                data_queue.put(("log", f"[{algorithm_name}] Ep {ep}: Rew {avg_r:.1f} Succ {avg_s:.1%} Coll {avg_c:.1%}\n"))
+                # ✅ Trust 정보 포함한 로그
+                log_msg = f"[{algorithm_name}] Ep {ep}: Rew {avg_r:.1f} Succ {avg_s:.1%} Coll {avg_c:.1%}"
+                if trust_gps_list:
+                    log_msg += f" | Trust GPS:{avg_trust_gps:.3f} Vis:{avg_trust_vis:.3f}"
+                if suspicion_ratio_list:
+                    log_msg += f" | Suspicion:{avg_suspicion:.3f}"
+                log_msg += "\n"
+                data_queue.put(("log", log_msg))
+                
                 data_queue.put(("graph", {
                     "algorithm": algorithm_name,
                     "rew": avg_r,
