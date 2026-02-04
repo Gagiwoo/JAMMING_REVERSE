@@ -670,6 +670,9 @@ class CTDEMultiUAVEnv:
             suspicion_ratio = sum(my_votes) / len(my_votes) if my_votes else 0.0
             self.consensus_votes[i] = suspicion_ratio  # 투표 비율 저장
             
+            # Spatial Discrepancy (이웃들과의 불일치 평균)
+            spat_disc = np.mean(discrepancies) if discrepancies else 0.0
+            
             # Trust Features (정규화)
             norm_temp = np.clip(temp_res / 2.0, 0.0, 1.0)
             norm_spat = np.clip(spat_disc / 1.0, 0.0, 1.0)
