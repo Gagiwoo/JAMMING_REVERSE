@@ -402,11 +402,11 @@ class FastMainWindow(MainWindow):
             config["attack_mode"] = atk_mode
             config.update(ALGORITHM_CONFIGS[name])
             
-            # 고속 모드 선택에 따라 다른 함수 사용
+            # 고속 모드 선택에 따라 다른 워커 사용
             if use_fast:
-                worker = TrainingWorker(config, name, self.data_queue, self.stop_flag, use_fast_training=True)
+                worker = TrainingWorkerFast(config, name, self.data_queue, self.stop_flag, use_fast_training=True)
             else:
-                worker = TrainingWorker(config, name, self.data_queue, self.stop_flag, use_fast_training=False)
+                worker = TrainingWorkerFast(config, name, self.data_queue, self.stop_flag, use_fast_training=False)
             
             worker.start()
             self.running_threads[name] = worker
