@@ -253,43 +253,41 @@ class ConsensusProtocol:
         is_under_attack = suspicion_ratio >= self.vote_threshold
         return is_under_attack, suspicion_ratio
     
-    def adjust_trust(self, trust_gps, trust_vis, consensus_vote, force_zero=False):
+    def adjust_trust(self, trust_gps, trust_vis, suspicion_ratio, force_zero=False):
         """
-        ✅ 개선: 50% 투표 기반 강제 설정 추가
+        ✅✅ 논문 명세 정확히 준수
         
         Args:
-            trust_gps: Current GPS trust score
-            trust_vis: Current Vision trust score
-            consensus_vote: Aggregated consensus vote (average discrepancy or ratio)
-            force_zero: If True, force GPS trust to 0 (collective decision)
+            trust_gps: Current GPS trust score (from Trust Network)
+            trust_vis: Current Vision trust score (from Trust Network)
+            suspicion_ratio: 의심 표 비율 (votes_received / total_neighbors)
+            force_zero: If True, force GPS trust to 0 (50% 이상 투표 시)
         Returns:
             adjusted_trust_gps, adjusted_trust_vis
+        
+        논문 알고리즘:
+        - suspicion_ratio >= 0.60 (60%): GPS trust -= 0.15
+        - suspicion_ratio < 0.40 (40%): GPS trust += 0.15
+        - 50% 이상 의심 표: GPS trust = 0.0 (force_zero=True)
         """
-        # ✅ 추가: 집단 의사결정에 의한 강제 설정
+        # ✅ 1단계: 50% 이상 의심 표 시 강제 설정
         if force_zero:
-            trust_gps = 0.0
-            trust_vis = 1.0
-            return trust_gps, trust_vis
+            return 0.0, 1.0
         
-        # 기존 부드러운 조정 (공격이 감지되지 않은 경우)
-        ratio = np.clip(consensus_vote / self.threshold, 0.0, 2.0)
+        # ✅ 2단계: 논문 명세대로 60%/40% 경계 기반 조정
+        if suspicion_ratio >= 0.60:
+            # 60% 이상 의심 표 → GPS 신뢰도 감소
+            trust_gps -= self.consensus_weight  # -0.15
+        elif suspicion_ratio < 0.40:
+            # 40% 미만 의심 표 → GPS 신뢰도 증가
+            trust_gps += self.consensus_weight  # +0.15
+        # 40% ~ 60% 사이: 조정 없음
         
-        if ratio > 0.8:  # 공격 의심 강화
-            delta = (ratio - 0.8) * self.consensus_weight * 1.5
-            trust_gps *= (1 - delta)
-            trust_vis *= (1 + delta)
-        elif ratio < 0.4:  # GPS 신뢰도 복구
-            delta = (0.4 - ratio) * self.consensus_weight * 0.5
-            trust_gps *= (1 + delta)
-            trust_vis *= (1 - delta)
+        # ✅ 3단계: 경계값 클리핑 [0.0, 1.0]
+        trust_gps = np.clip(trust_gps, 0.0, 1.0)
+        trust_vis = 1.0 - trust_gps
         
-        # 범위 제한
-        trust_gps = np.clip(trust_gps, 0.01, 0.99)
-        trust_vis = np.clip(trust_vis, 0.01, 0.99)
-        
-        # 정규화
-        total = trust_gps + trust_vis
-        return trust_gps / total, trust_vis / total
+        return trust_gps, trust_vis
 
 
 class LSTMSpoofDetector(nn.Module):
@@ -667,9 +665,10 @@ class CTDEMultiUAVEnv:
                     flat_neighbor.append(item)
             neighbor_info = np.array(flat_neighbor, dtype=np.float32)
             
-            # Consensus Vote 계산
-            spat_disc = np.mean(discrepancies) if discrepancies else 0.0
-            self.consensus_votes[i] = spat_disc
+            # ✅✅ 논문 명세: Consensus Vote는 suspicion_ratio (내가 받은 의심 표 비율)
+            my_votes = self.suspicion_votes_received[i]
+            suspicion_ratio = sum(my_votes) / len(my_votes) if my_votes else 0.0
+            self.consensus_votes[i] = suspicion_ratio  # 투표 비율 저장
             
             # Trust Features (정규화)
             norm_temp = np.clip(temp_res / 2.0, 0.0, 1.0)
@@ -689,7 +688,7 @@ class CTDEMultiUAVEnv:
                 self.last_velocities[i] / self.grid_size,  # ✅ 추가: velocity
                 self.target_positions[i] / self.grid_size,
                 trust_feats,
-                [spat_disc]  # consensus vote
+                [suspicion_ratio]  # ✅ 수정: 투표 비율 (discrepancy 평균 아님)
             ])
             
             local_vis = self._extract_local_vision(self.uav_positions[i])
@@ -930,19 +929,21 @@ class MAPPOAgentWithTrust:
                     # Consensus Vote (관찰 공간의 마지막 trust feature 다음)
                     vote = obs[10] if self.use_consensus else 0.0
                     
-                    # ✅ 개선: Consensus Protocol 적용
+                    # ✅✅ 논문 명세: Consensus Protocol 적용
                     force_zero = False
+                    suspicion_ratio = 0.0
+                    
                     if self.use_consensus and env is not None:
                         # 받은 의심 표 집계
                         votes_received = env.suspicion_votes_received[idx]
                         is_under_attack, suspicion_ratio = self.consensus.aggregate_votes(votes_received)
                         force_zero = is_under_attack
                         
-                        # Trust 조정
+                        # Trust 조정 (논문 명세대로 suspicion_ratio 사용)
                         t_gps, t_vis = self.consensus.adjust_trust(
                             t_out[0].item(), 
                             t_out[1].item(), 
-                            vote,
+                            suspicion_ratio=suspicion_ratio,  # ✅ 투표 비율 사용
                             force_zero=force_zero
                         )
                     else:
@@ -1157,6 +1158,7 @@ def run_training(config, algorithm_name, data_queue, stop_flag):
                 break
             
             rew_list, succ_list, coll_list = [], [], []
+            trust_gps_list, trust_vis_list, suspicion_ratio_list = [], [], []  # ✅ 추가
             
             for _ in range(config["episodes_per_batch"]):
                 scen = EnvironmentScenario(config)
@@ -1167,12 +1169,23 @@ def run_training(config, algorithm_name, data_queue, stop_flag):
                 
                 # 에피소드 버퍼
                 ep_obs, ep_glo, ep_act, ep_logp, ep_val, ep_rew, ep_done = [],[],[],[],[],[],[]
+                ep_trust_gps, ep_trust_vis, ep_suspicion = [], [], []  # ✅ 추가
                 
                 while not done:
                     # ✅ 개선: env 객체를 select_action에 전달
                     acts, logs, val, trust_info = agent.select_action(
                         lo, go, env.uav_positions, env.gps_positions, env=env
                     )
+                    
+                    # ✅ Trust 정보 수집
+                    for aid in env.agents:
+                        if aid in trust_info:
+                            ep_trust_gps.append(trust_info[aid]['gps'])
+                            ep_trust_vis.append(trust_info[aid]['vis'])
+                    
+                    # Suspicion ratio 수집
+                    ep_suspicion.extend(env.consensus_votes.tolist())
+                    
                     n_lo, n_go, rew, done, info = env.step(acts)
                     
                     ep_obs.extend([lo[a] for a in env.agents if a in acts])
@@ -1192,6 +1205,13 @@ def run_training(config, algorithm_name, data_queue, stop_flag):
                 rew_list.append(ep_r)
                 succ_list.append(info.get("success_rate", 0))
                 coll_list.append(info.get("collision_rate", 0))
+                
+                # ✅ Trust 통계 수집
+                if ep_trust_gps:
+                    trust_gps_list.append(np.mean(ep_trust_gps))
+                    trust_vis_list.append(np.mean(ep_trust_vis))
+                if ep_suspicion:
+                    suspicion_ratio_list.append(np.mean(ep_suspicion))
             
             # GAE 계산 & 업데이트
             with torch.no_grad():
@@ -1204,6 +1224,16 @@ def run_training(config, algorithm_name, data_queue, stop_flag):
             writer.add_scalar("Reward", avg_r, ep)
             writer.add_scalar("Success", avg_s, ep)
             writer.add_scalar("Collision", avg_c, ep)
+            
+            # ✅ Trust/Consensus 통계 로깅
+            if trust_gps_list:
+                avg_trust_gps = np.mean(trust_gps_list)
+                avg_trust_vis = np.mean(trust_vis_list)
+                writer.add_scalar("Trust/GPS", avg_trust_gps, ep)
+                writer.add_scalar("Trust/Vision", avg_trust_vis, ep)
+            if suspicion_ratio_list:
+                avg_suspicion = np.mean(suspicion_ratio_list)
+                writer.add_scalar("Consensus/SuspicionRatio", avg_suspicion, ep)
             
             if ep % 100 == 0:
                 data_queue.put(("log", f"[{algorithm_name}] Ep {ep}: Rew {avg_r:.1f} Succ {avg_s:.1%} Coll {avg_c:.1%}\n"))
