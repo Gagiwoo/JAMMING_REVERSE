@@ -47,12 +47,12 @@ warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib.font_
 
 # ==================== CONFIG (논문 명세 준수) ====================
 BASE_CONFIG = {
-    # ---------------- 보상 설정 ----------------
-    "reward_goal": 50.0,
-    "reward_team_success": 20.0,
-    "reward_collision": -10.0,
+    # ---------------- 보상 설정 (최적화) ----------------
+    "reward_goal": 100.0,  # ✅ 50 → 100 (목표 도달 강한 보상)
+    "reward_team_success": 30.0,  # ✅ 20 → 30
+    "reward_collision": -50.0,  # ✅ -10 → -50 (충돌 강한 페널티)
     "reward_step_penalty": -0.1,  # 논문: -0.1 per step
-    "distance_reward_factor": 0.1,
+    "distance_reward_factor": 1.0,  # ✅ 0.1 → 1.0 (목표 접근 보상 증가)
     
     # ---------------- 학습 하이퍼파라미터 (논문 명세) ----------------
     "mappo_lr": 3e-4,  # ✅ 수정: 5e-4 → 3e-4
@@ -64,19 +64,19 @@ BASE_CONFIG = {
     "update_epochs": 10,
     "batch_size": 512,
     
-    # ---------------- 환경 설정 ----------------
-    "num_uavs": 10,
+    # ---------------- 환경 설정 (학습 최적화) ----------------
+    "num_uavs": 8,  # ✅ 10 → 8 (협력 난이도 감소)
     "grid_size": 40,
-    "num_obstacles": 40,
+    "num_obstacles": 25,  # ✅ 40 → 25 (장애물 감소)
     "max_steps": 200,
-    "vision_range": 5,
+    "vision_range": 6,  # ✅ 5 → 6 (관측 범위 증가)
     
-    # ---------------- 공격 설정 (논문 명세) ----------------
-    "attack_prob": 0.1,  # ✅ 수정: 5% → 10%
+    # ---------------- 공격 설정 (학습 단계별 최적화) ----------------
+    "attack_prob": 0.02,  # ✅ 0.1 → 0.02 (실제 ~20% 공격 비율)
     "attack_mode": "hybrid",
-    "attack_start_prob": 0.1,  # ✅ 수정: 0.05 → 0.1 (10%)
-    "attack_min_duration": 10,
-    "attack_max_duration": 30,
+    "attack_start_prob": 0.02,  # ✅ 0.1 → 0.02 (초기 학습 가능 수준)
+    "attack_min_duration": 15,  # ✅ 10 → 15 (공격 더 명확히)
+    "attack_max_duration": 25,  # ✅ 30 → 25
     
     # ---------------- Trust Network 설정 (논문 핵심) ----------------
     "use_trust_network": True,
@@ -630,11 +630,14 @@ class CTDEMultiUAVEnv:
             # GPS Variance (공격 여부에 따라 다름)
             gps_var = np.random.uniform(0.1, 0.5) if not self.is_under_attack[i] else np.random.uniform(2.0, 5.0)
             
-            # 이웃 정보 및 Spatial Discrepancy 계산
-            neighbor_info, discrepancies = [], []
+            # ✅ 개선: 이웃 정보 고정 차원으로 생성
+            neighbor_features = []  # 고정 길이 리스트
+            discrepancies = []
+            
             for j in range(self.num_uavs):
                 if i == j:
                     continue
+                
                 dist = np.linalg.norm(self.uav_positions[j] - self.uav_positions[i])
                 if dist <= self.vision_range:
                     vis_pos = self.uav_positions[j]
@@ -644,26 +647,20 @@ class CTDEMultiUAVEnv:
                     
                     # ✅ 추가: 투표 수행
                     if disc > self.consensus.threshold:
-                        self.suspicion_votes_received[j].append(1)  # j에게 의심 표 전달
+                        self.suspicion_votes_received[j].append(1)
                     else:
                         self.suspicion_votes_received[j].append(0)
                     
-                    neighbor_info.extend([
-                        (vis_pos - self.uav_positions[i])/self.grid_size,  # 상대 위치
-                        (self.gps_positions[j] - self.gps_positions[i])/self.grid_size,  # GPS 상대 위치
-                        disc  # 불일치
-                    ])
+                    # 상대 위치 (2), GPS 상대 위치 (2), 불일치 (1) = 5차원
+                    rel_pos = (vis_pos - self.uav_positions[i]) / self.grid_size
+                    gps_rel = (self.gps_positions[j] - self.gps_positions[i]) / self.grid_size
+                    neighbor_features.extend([rel_pos[0], rel_pos[1], gps_rel[0], gps_rel[1], disc])
                 else:
-                    neighbor_info.extend([np.zeros(2), np.zeros(2), 0.0])
+                    # 이웃이 범위 밖: 0으로 채움
+                    neighbor_features.extend([0.0, 0.0, 0.0, 0.0, 0.0])
             
-            # Flatten neighbor info
-            flat_neighbor = []
-            for item in neighbor_info:
-                if isinstance(item, np.ndarray):
-                    flat_neighbor.extend(item)
-                else:
-                    flat_neighbor.append(item)
-            neighbor_info = np.array(flat_neighbor, dtype=np.float32)
+            # 고정 길이 보장: (num_uavs-1) * 5
+            neighbor_info = np.array(neighbor_features, dtype=np.float32)
             
             # ✅✅ 논문 명세: Consensus Vote는 suspicion_ratio (내가 받은 의심 표 비율)
             my_votes = self.suspicion_votes_received[i]
