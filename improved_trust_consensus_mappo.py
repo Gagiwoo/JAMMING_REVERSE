@@ -78,16 +78,16 @@ BASE_CONFIG = {
     "attack_min_duration": 15,  # ✅ 10 → 15 (공격 더 명확히)
     "attack_max_duration": 25,  # ✅ 30 → 25
     
-    # ---------------- Trust Network 설정 (논문 핵심) ----------------
+    # ---------------- Trust Network 설정 (논문 최적화) ----------------
     "use_trust_network": True,
-    "trust_hidden": 16,  # ✅ 수정: 32 → 16
-    "trust_lambda_reg": 0.1,  # ✅ 수정: 0.05 → 0.1
+    "trust_hidden": 16,
+    "trust_lambda_reg": 0.05,  # ✅ 0.1 → 0.05 (smoothness 완화)
     
-    # ---------------- Consensus 설정 (논문 핵심) ----------------
+    # ---------------- Consensus 설정 (논문 최적화 - 완화) ----------------
     "use_consensus": True,
-    "consensus_threshold": 2.5,  # ✅ 수정: 2.0 → 2.5 cells
-    "consensus_weight": 0.15,  # ✅ 수정: 0.2 → 0.15
-    "consensus_vote_threshold": 0.5,  # ✅ 추가: 50% 투표 임계값
+    "consensus_threshold": 2.5,
+    "consensus_weight": 0.08,  # ✅ 0.15 → 0.08 (부드러운 조정)
+    "consensus_vote_threshold": 0.7,  # ✅ 0.5 → 0.7 (70% 확실할 때만 차단)
     
     # ---------------- LSTM 기반 스푸핑 보정기 설정 ----------------
     "detector_seq_len": 10,
