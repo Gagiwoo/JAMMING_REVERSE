@@ -48,15 +48,14 @@ warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib.font_
 # ==================== CONFIG (논문 명세 준수) ====================
 BASE_CONFIG = {
     # ---------------- 보상 설정 (최적화) ----------------
-    "reward_goal": 100.0,  # ✅ 50 → 100 (목표 도달 강한 보상)
-    "reward_team_success": 30.0,  # ✅ 20 → 30
-    "reward_collision": -50.0,  # ✅ -10 → -50 (충돌 강한 페널티)
-    "reward_step_penalty": -0.1,  # 논문: -0.1 per step
-    "distance_reward_factor": 1.0,  # ✅ 0.1 → 1.0 (목표 접근 보상 증가)
+    "reward_goal": 120.0,  # 🔥 100 → 120 (목표 도달 강한 보상)
+    "reward_team_success": 30.0,
+    "reward_collision": -30.0,  # 🔥 -50 → -30 (충돌 페널티 완화)
+    "reward_step_penalty": -0.1,
+    "distance_reward_factor": 1.5,  # 🔥 1.0 → 1.5 (목표 접근 보상 더 증가)
     
     # ---------------- 학습 하이퍼파라미터 (논문 명세) ----------------
-    "mappo_lr": 3e-4,  # ✅ 수정: 5e-4 → 3e-4
-    "trust_lr": 1.5e-4,  # ✅ 추가: Trust Network Learning Rate (50% of Actor)
+    "mappo_lr": 1e-4,  # 🔥 3e-4 → 1e-4 (Trust가 더 빠르게 학습되도록)
     "mappo_entropy": 0.01,
     "gamma": 0.99,
     "gae_lambda": 0.95,
@@ -65,29 +64,30 @@ BASE_CONFIG = {
     "batch_size": 512,
     
     # ---------------- 환경 설정 (학습 최적화) ----------------
-    "num_uavs": 8,  # ✅ 10 → 8 (협력 난이도 감소)
+    "num_uavs": 6,  # 🔥 8 → 6 (더 단순한 협력)
     "grid_size": 40,
-    "num_obstacles": 25,  # ✅ 40 → 25 (장애물 감소)
-    "max_steps": 200,
-    "vision_range": 6,  # ✅ 5 → 6 (관측 범위 증가)
+    "num_obstacles": 20,  # 🔥 25 → 20 (장애물 더 감소)
+    "max_steps": 150,  # 🔥 200 → 150 (빠른 에피소드)
+    "vision_range": 6,
     
     # ---------------- 공격 설정 (학습 단계별 최적화) ----------------
-    "attack_prob": 0.02,  # ✅ 0.1 → 0.02 (실제 ~20% 공격 비율)
+    "attack_prob": 0.05,  # 🔥 0.02 → 0.05 (실제 ~30% 공격 비율로 증가)
     "attack_mode": "hybrid",
-    "attack_start_prob": 0.02,  # ✅ 0.1 → 0.02 (초기 학습 가능 수준)
-    "attack_min_duration": 15,  # ✅ 10 → 15 (공격 더 명확히)
-    "attack_max_duration": 25,  # ✅ 30 → 25
+    "attack_start_prob": 0.05,  # 🔥 0.02 → 0.05 (Trust 효과를 보기 위해 증가)
+    "attack_min_duration": 15,
+    "attack_max_duration": 25,
     
-    # ---------------- Trust Network 설정 (논문 최적화) ----------------
+    # ---------------- Trust Network 설정 (🔥 NEW: GPS Correction 방식) ----------------
     "use_trust_network": True,
-    "trust_hidden": 16,
-    "trust_lambda_reg": 0.05,  # ✅ 0.1 → 0.05 (smoothness 완화)
+    "trust_hidden": 32,  # 🔥 16 → 32 (더 강력한 네트워크)
+    "trust_lr": 5e-4,  # 🔥 1.5e-4 → 5e-4 (빠른 학습)
+    "trust_lambda_reg": 0.05,  # Smoothness regularization
     
-    # ---------------- Consensus 설정 (논문 최적화 - 완화) ----------------
+    # ---------------- Consensus 설정 (🔥 NEW: 보정 스케일 조정 방식) ----------------
     "use_consensus": True,
     "consensus_threshold": 2.5,
-    "consensus_weight": 0.08,  # ✅ 0.15 → 0.08 (부드러운 조정)
-    "consensus_vote_threshold": 0.7,  # ✅ 0.5 → 0.7 (70% 확실할 때만 차단)
+    "consensus_weight": 0.08,  # 사용 안 함 (보정 스케일로 대체)
+    "consensus_vote_threshold": 0.5,  # 🔥 0.7 → 0.5 (50% 투표로 복원)
     
     # ---------------- LSTM 기반 스푸핑 보정기 설정 ----------------
     "detector_seq_len": 10,
@@ -149,56 +149,68 @@ def create_model_folder_name(config, algorithm):
 
 class TrustNetwork(nn.Module):
     """
-    ✅ 개선: 논문 명세에 맞게 수정
-    - 3개의 은닉층, 각 16 뉴런
+    🔥 NEW: GPS Correction Network (Detector 방식)
+    - 3개의 은닉층, 각 32 뉴런
     - 입력: 4차원 (temporal_residual, spatial_discrepancy, gps_variance, vision_quality)
-    - 출력: 2차원 (GPS trust, Vision trust)
+    - 출력: 2차원 (correction_x, correction_y) - GPS 보정값
+    
+    핵심 아이디어:
+    - Trust 가중치 대신 "얼마나 보정할지" 직접 학습
+    - Vision 위치 문제 해결
+    - LSTM-Detector와 공정한 비교
     """
-    def __init__(self, hidden=16):
+    def __init__(self, hidden=32, max_correction=5.0):
         super().__init__()
+        self.max_correction = max_correction  # 최대 보정 범위 (±5 셀)
+        
         self.network = nn.Sequential(
-            nn.Linear(4, hidden), nn.ReLU(),      # Layer 1: 4 → 16
-            nn.Linear(hidden, hidden), nn.ReLU(), # Layer 2: 16 → 16
-            nn.Linear(hidden, hidden), nn.ReLU(), # Layer 3: 16 → 16 (✅ 추가)
-            nn.Linear(hidden, 2),                 # Output: 16 → 2
-            nn.Softmax(dim=-1)
+            nn.Linear(4, hidden), nn.ReLU(),      # Layer 1: 4 → 32
+            nn.Linear(hidden, hidden), nn.ReLU(), # Layer 2: 32 → 32
+            nn.Linear(hidden, hidden), nn.ReLU(), # Layer 3: 32 → 32
+            nn.Linear(hidden, 2),                 # Output: 32 → 2 (correction_x, correction_y)
+            nn.Tanh()                             # Tanh로 [-1, 1] 범위 제한
         )
     
     def forward(self, trust_features):
         """
         Args:
             trust_features: (batch_size, 4) tensor
-                - normalized temporal residual
-                - normalized spatial discrepancy
-                - GPS variance
-                - Vision quality (1 if neighbors exist, else 0)
+                - normalized temporal residual (GPS 예측 오차)
+                - normalized spatial discrepancy (이웃과의 불일치)
+                - GPS variance (공격 시 높음)
+                - Vision quality (이웃 존재 여부)
         Returns:
-            trust_scores: (batch_size, 2) tensor [GPS_trust, Vision_trust]
+            correction: (batch_size, 2) tensor [correction_x, correction_y]
+                범위: [-max_correction, +max_correction]
         """
-        return self.network(trust_features)
+        return self.network(trust_features) * self.max_correction
 
 
 class TrustLoss:
     """
-    논문 수식: Loss = MSE(p_fused, p_real) + λ * MSE(trust_t, trust_{t-1})
-    Smoothness Regularization을 통한 안정적인 신뢰도 학습
+    🔥 NEW: GPS Correction Loss
+    Loss = MSE(corrected_pos, real_pos) + λ * MSE(correction_t, correction_{t-1})
+    
+    핵심:
+    - 보정된 위치가 실제 위치에 가까워지도록 학습
+    - Smoothness Regularization으로 급격한 변화 방지
     """
-    def __init__(self, lambda_reg=0.1):  # ✅ 수정: 0.05 → 0.1
+    def __init__(self, lambda_reg=0.05):
         self.lambda_reg = lambda_reg
     
-    def compute(self, fused_pos, real_pos, current_trust, prev_trust):
+    def compute(self, corrected_pos, real_pos, current_correction, prev_correction):
         """
         Args:
-            fused_pos: 융합된 위치 (batch_size, 2)
+            corrected_pos: GPS + correction (batch_size, 2)
             real_pos: 실제 위치 (batch_size, 2)
-            current_trust: 현재 신뢰도 점수 (batch_size, 2)
-            prev_trust: 이전 신뢰도 점수 (batch_size, 2)
+            current_correction: 현재 보정값 (batch_size, 2)
+            prev_correction: 이전 보정값 (batch_size, 2)
         Returns:
-            total_loss: Fusion Loss + λ * Smoothness Loss
+            total_loss: Correction Loss + λ * Smoothness Loss
         """
-        fusion_loss = torch.mean((fused_pos - real_pos) ** 2)
-        smoothness_loss = torch.mean((current_trust - prev_trust) ** 2)
-        return fusion_loss + self.lambda_reg * smoothness_loss
+        correction_loss = torch.mean((corrected_pos - real_pos) ** 2)
+        smoothness_loss = torch.mean((current_correction - prev_correction) ** 2)
+        return correction_loss + self.lambda_reg * smoothness_loss
 
 
 class ConsensusProtocol:
@@ -890,7 +902,8 @@ class MAPPOAgentWithTrust:
     def reset_episode(self, agents):
         """에피소드 시작 시 초기화"""
         if self.use_trust:
-            self.last_trust_scores = {a: torch.tensor([0.5, 0.5], device=DEVICE) for a in agents}
+            # 🔥 NEW: 초기 보정값은 0으로 시작
+            self.last_trust_scores = {a: torch.tensor([0.0, 0.0], device=DEVICE) for a in agents}
         if self.use_detector:
             self.det_hist = {a: deque(maxlen=self.config["detector_seq_len"]) for a in agents}
     
@@ -922,65 +935,63 @@ class MAPPOAgentWithTrust:
                 fused_pos_np = gps_pos[idx].copy()
                 
                 if self.use_trust:
-                    # Trust Network로 신뢰도 계산
+                    # 🔥 NEW: Trust Network로 GPS 보정값 계산
                     t_feat = obs_t[:, 6:10]  # trust_features (4차원)
-                    t_out = self.trust_net(t_feat).squeeze(0)
+                    correction = self.trust_net(t_feat).squeeze(0)  # (2,) [correction_x, correction_y]
                     
-                    # Consensus Vote (관찰 공간의 마지막 trust feature 다음)
-                    vote = obs[10] if self.use_consensus else 0.0
-                    
-                    # ✅✅ 논문 명세: Consensus Protocol 적용
+                    # 🔥 NEW: Consensus Protocol로 보정값 조정
                     force_zero = False
                     suspicion_ratio = 0.0
+                    correction_scale = 1.0
                     
                     if self.use_consensus and env is not None:
                         # 받은 의심 표 집계
                         votes_received = env.suspicion_votes_received[idx]
                         is_under_attack, suspicion_ratio = self.consensus.aggregate_votes(votes_received)
-                        force_zero = is_under_attack
                         
-                        # Trust 조정 (논문 명세대로 suspicion_ratio 사용)
-                        t_gps, t_vis = self.consensus.adjust_trust(
-                            t_out[0].item(), 
-                            t_out[1].item(), 
-                            suspicion_ratio=suspicion_ratio,  # ✅ 투표 비율 사용
-                            force_zero=force_zero
-                        )
-                    else:
-                        t_gps, t_vis = t_out[0].item(), t_out[1].item()
+                        if is_under_attack:
+                            # 50% 이상 의심 표: 보정값을 강하게 적용
+                            force_zero = True
+                            correction_scale = 2.0  # 보정 강도 2배
+                        elif suspicion_ratio >= 0.3:
+                            # 30-50% 의심 표: 보정값 증가
+                            correction_scale = 1.5
+                        elif suspicion_ratio < 0.1:
+                            # 의심 표 거의 없음: 보정값 감소
+                            correction_scale = 0.5
                     
-                    trust_info[aid] = {
-                        'gps': t_gps, 
-                        'vis': t_vis,
-                        'force_zero': force_zero
-                    }
-                    
-                    # ✅ 개선: 융합된 위치 계산
+                    # 🔥 NEW: GPS + 보정값으로 최종 위치 계산
                     if real_pos is not None:
                         gp = torch.tensor(gps_pos[idx], device=DEVICE, dtype=torch.float32)
                         rp = torch.tensor(real_pos[idx], device=DEVICE, dtype=torch.float32)
                         
-                        # ✅ 수정: gradient를 유지하기 위해 t_out 텐서 직접 사용
-                        fused = t_out[0] * gp + t_out[1] * rp
-                        prev = self.last_trust_scores.get(aid, torch.tensor([0.5, 0.5], device=DEVICE))
+                        # 보정된 위치 계산 (gradient 유지)
+                        corrected_pos = gp + correction * correction_scale
+                        prev_correction = self.last_trust_scores.get(aid, torch.tensor([0.0, 0.0], device=DEVICE))
                         
                         # Trust Loss 계산용 버퍼에 저장
                         self.trust_buf['feat'].append(t_feat.squeeze(0))  # (4,)
-                        self.trust_buf['gps'].append(gp)  # ✅ 추가: GPS 위치 저장
-                        self.trust_buf['real'].append(rp)
-                        self.trust_buf['prev'].append(prev)
-                        self.last_trust_scores[aid] = t_out.detach()
+                        self.trust_buf['gps'].append(gp)  # GPS 위치
+                        self.trust_buf['real'].append(rp)  # 실제 위치
+                        self.trust_buf['prev'].append(prev_correction)  # 이전 보정값
+                        self.last_trust_scores[aid] = correction.detach()
                         
-                        fused_pos_np = fused.detach().cpu().numpy()
-                        
-                        fused_pos_np = fused.cpu().numpy()
+                        corrected_pos_np = corrected_pos.detach().cpu().numpy()
                     else:
-                        # 실제 위치가 없는 경우 (평가 모드) GPS와 관측 위치 융합
-                        fused_pos_np = t_gps * gps_pos[idx] + t_vis * gps_pos[idx]  # 근사치
+                        # 평가 모드: GPS + 보정값 (gradient 없음)
+                        corrected_pos_np = gps_pos[idx] + correction.cpu().numpy() * correction_scale
                     
-                    # ✅ 개선: Actor 입력에 융합된 위치 사용
-                    obs_mod[0:2] = fused_pos_np / self.config["grid_size"]
+                    # 🔥 NEW: Actor 입력에 보정된 위치 사용
+                    obs_mod[0:2] = corrected_pos_np / self.config["grid_size"]
                     obs_t = torch.tensor(obs_mod, dtype=torch.float32, device=DEVICE).unsqueeze(0)
+                    
+                    # Trust 정보 (보정 크기를 gps trust로 표현)
+                    correction_magnitude = float(torch.norm(correction).item())
+                    trust_info[aid] = {
+                        'gps': 1.0 - min(correction_magnitude / 5.0, 1.0),  # 보정 클수록 신뢰도 낮음
+                        'vis': min(correction_magnitude / 5.0, 1.0),  # 보정 크기
+                        'force_zero': force_zero
+                    }
                 
                 elif self.use_detector:
                     # LSTM Detector 사용
@@ -1060,24 +1071,21 @@ class MAPPOAgentWithTrust:
             self.actor_opt.step()
             self.critic_opt.step()
         
-        # Trust Network Update
+        # 🔥 NEW: Trust Network Update (GPS Correction 방식)
         if self.use_trust and self.trust_buf['feat']:
-            # ✅ 수정: Trust Network를 다시 forward pass 하여 gradient 연결
             feat_tensor = torch.stack(self.trust_buf['feat'])  # (N, 4)
             gps_tensor = torch.stack(self.trust_buf['gps'])    # (N, 2)
             real_tensor = torch.stack(self.trust_buf['real'])  # (N, 2)
-            prev_tensor = torch.stack(self.trust_buf['prev'])  # (N, 2)
+            prev_correction = torch.stack(self.trust_buf['prev'])  # (N, 2) 이전 보정값
             
             # Trust Network forward (gradient 활성화)
-            trust_out = self.trust_net(feat_tensor)  # (N, 2) [GPS_trust, Vision_trust]
+            correction = self.trust_net(feat_tensor)  # (N, 2) [correction_x, correction_y]
             
-            # 융합된 위치 계산
-            fused_pos = trust_out[:, 0:1] * gps_tensor + trust_out[:, 1:2] * real_tensor
+            # 보정된 위치 계산
+            corrected_pos = gps_tensor + correction
             
-            # Loss 계산: Fusion Loss + Smoothness Loss
-            fusion_loss = torch.mean((fused_pos - real_tensor) ** 2)
-            smoothness_loss = torch.mean((trust_out - prev_tensor) ** 2)
-            loss = fusion_loss + self.trust_loss.lambda_reg * smoothness_loss
+            # 🔥 NEW Loss 계산: Correction Loss + Smoothness Loss
+            loss = self.trust_loss.compute(corrected_pos, real_tensor, correction, prev_correction)
             
             self.trust_opt.zero_grad()
             loss.backward()
