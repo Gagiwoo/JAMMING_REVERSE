@@ -54,8 +54,8 @@ BASE_CONFIG = {
     "reward_step_penalty": -0.1,
     "distance_reward_factor": 1.5,  # 🔥 1.0 → 1.5 (목표 접근 보상 더 증가)
     
-    # ---------------- 학습 하이퍼파라미터 (논문 명세) ----------------
-    "mappo_lr": 1e-4,  # 🔥 3e-4 → 1e-4 (Trust가 더 빠르게 학습되도록)
+    # ---------------- 학습 하이퍼파라미터 (🔥 FIX: 균형 학습) ----------------
+    "mappo_lr": 3e-4,  # 🔥 1e-4 → 3e-4 (MAPPO도 빠르게)
     "mappo_entropy": 0.01,
     "gamma": 0.99,
     "gae_lambda": 0.95,
@@ -63,25 +63,26 @@ BASE_CONFIG = {
     "update_epochs": 10,
     "batch_size": 512,
     
-    # ---------------- 환경 설정 (학습 최적화) ----------------
-    "num_uavs": 6,  # 🔥 8 → 6 (더 단순한 협력)
+    # ---------------- 환경 설정 (🔥 FIX: 조금 더 쉽게) ----------------
+    "num_uavs": 5,  # 🔥 6 → 5 (더더 단순한 협력)
     "grid_size": 40,
-    "num_obstacles": 20,  # 🔥 25 → 20 (장애물 더 감소)
-    "max_steps": 150,  # 🔥 200 → 150 (빠른 에피소드)
+    "num_obstacles": 15,  # 🔥 20 → 15 (장애물 더더 감소)
+    "max_steps": 150,
     "vision_range": 6,
     
-    # ---------------- 공격 설정 (학습 단계별 최적화) ----------------
-    "attack_prob": 0.05,  # 🔥 0.02 → 0.05 (실제 ~30% 공격 비율로 증가)
+    # ---------------- 공격 설정 (🔥 FIX: 공격 비율 완화) ----------------
+    "attack_prob": 0.02,  # 🔥 0.05 → 0.02 (다시 낮춤)
     "attack_mode": "hybrid",
-    "attack_start_prob": 0.05,  # 🔥 0.02 → 0.05 (Trust 효과를 보기 위해 증가)
-    "attack_min_duration": 15,
-    "attack_max_duration": 25,
+    "attack_start_prob": 0.02,  # 🔥 0.05 → 0.02 (실제 ~20% 공격)
+    "attack_min_duration": 10,  # 🔥 15 → 10
+    "attack_max_duration": 20,  # 🔥 25 → 20
     
-    # ---------------- Trust Network 설정 (🔥 NEW: GPS Correction 방식) ----------------
+    # ---------------- Trust Network 설정 (🔥 FIX: 균형 학습) ----------------
     "use_trust_network": True,
-    "trust_hidden": 32,  # 🔥 16 → 32 (더 강력한 네트워크)
-    "trust_lr": 5e-4,  # 🔥 1.5e-4 → 5e-4 (빠른 학습)
-    "trust_lambda_reg": 0.05,  # Smoothness regularization
+    "trust_hidden": 32,  # 더 강력한 네트워크
+    "trust_lr": 3e-4,  # 🔥 5e-4 → 3e-4 (MAPPO와 같은 속도)
+    "trust_lambda_reg": 0.1,  # 🔥 0.05 → 0.1 (smoothness 강화)
+    "max_correction": 3.0,  # 🔥 NEW: 최대 보정 범위 (5.0 → 3.0)
     
     # ---------------- Consensus 설정 (🔥 NEW: 보정 스케일 조정 방식) ----------------
     "use_consensus": True,
@@ -874,8 +875,10 @@ class MAPPOAgentWithTrust:
         self.use_detector = config.get("use_spoof_lstm_detector", False)
         
         if self.use_trust:
-            self.trust_net = TrustNetwork(config["trust_hidden"]).to(DEVICE)
-            # ✅ 수정: Trust Network LR = Actor LR * 50%
+            self.trust_net = TrustNetwork(
+                config["trust_hidden"], 
+                config.get("max_correction", 3.0)  # 🔥 config에서 max_correction 가져오기
+            ).to(DEVICE)
             self.trust_opt = optim.Adam(self.trust_net.parameters(), lr=config["trust_lr"])
             self.trust_loss = TrustLoss(config["trust_lambda_reg"])
             self.last_trust_scores = {}
